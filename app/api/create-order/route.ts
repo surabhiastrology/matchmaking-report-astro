@@ -1,30 +1,38 @@
-// app/api/create-order/route.ts
 import { NextResponse } from "next/server";
-import Razorpay from "razorpay";
+import { resolveCheckoutSelection } from "@/lib/checkoutCatalog";
+import { createRazorpayClient } from "@/lib/razorpay";
 
 export async function POST(req: Request) {
-  const razorpay = new Razorpay({
-    key_id: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID as string,
-    key_secret: process.env.RAZORPAY_KEY_SECRET as string,
-  });
-
   try {
     const body = await req.json();
-    const { amount, form } = body; // <--- 1. Catch the form data here
+    const { service, plan, form } = body;
+    const selection = resolveCheckoutSelection(service, plan);
 
-    const options = {
-      amount: amount * 100,
-      currency: "INR",
-      receipt: `receipt_${Date.now()}`,
-      // 2. Staple the form data to the order using 'notes'
-      notes: {
-        formData: JSON.stringify(form) 
-      }
+    if (!selection) {
+      return NextResponse.json({ error: "Invalid service or plan" }, { status: 400 });
+    }
+
+    const trustedForm = {
+      ...form,
+      reportType: selection.reportType,
     };
 
+    const options = {
+      amount: selection.amount * 100,
+      currency: "INR",
+      receipt: `receipt_${Date.now()}`,
+      notes: {
+        service: selection.service,
+        plan: selection.plan,
+        formData: JSON.stringify(trustedForm),
+      },
+    };
+
+    const razorpay = createRazorpayClient();
     const order = await razorpay.orders.create(options);
-    return NextResponse.json(order);
-  } catch (error) {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    return NextResponse.json({ ...order, checkout: selection });
+  } catch (error: unknown) {
+    console.error("Failed to create Razorpay order:", error);
+    return NextResponse.json({ error: "Failed to create order" }, { status: 500 });
   }
 }

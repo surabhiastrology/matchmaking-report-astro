@@ -4,6 +4,7 @@ import { useEffect, useState, Suspense, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
+import { resolveCheckoutSelection } from "@/lib/checkoutCatalog";
 
 // ==========================================
 // 1. QUESTION DATABASE
@@ -66,13 +67,13 @@ function CheckoutContent() {
   const searchParams = useSearchParams();
   const urlService = searchParams.get("service");
   const urlPlan = searchParams.get("plan");
-  
-  const serviceName = urlService ? decodeURIComponent(urlService) : "Premium Personalized Kundali";
-  const planName = urlPlan ? decodeURIComponent(urlPlan) : "10-Year Report (₹999)";
+  const selection = resolveCheckoutSelection(urlService, urlPlan);
+  const serviceName = selection?.service || "Invalid service";
+  const planName = selection?.plan || "Invalid plan";
 
   const hasStartedForm = useRef(false);
 
-  const isMatchmaking = serviceName.toLowerCase().includes("couple match making");
+  const isMatchmaking = selection?.isMatchmaking ?? false;
   
   // FIXED: Dynamic detection for ANY plan containing 1Q, 1 Question, or Hindi equivalents
   const planNameLower = planName.toLowerCase();
@@ -82,14 +83,9 @@ function CheckoutContent() {
     planNameLower.includes("question") || 
     planNameLower.includes("प्रश्न");
 
-  let basePrice = 999;
-  const priceMatch = planName.match(/₹([\d,]+)/);
-  if (priceMatch && priceMatch[1]) {
-    basePrice = parseInt(priceMatch[1].replace(/,/g, ""), 10);
-  }
-
-  const cleanPlanName = planName.replace(/\s*\(₹[\d,]+\)/, "");
-  const fullReportType = `${serviceName} - ${cleanPlanName}`;
+  const basePrice = selection?.amount ?? 0;
+  const cleanPlanName = planName;
+  const fullReportType = selection?.reportType || "Invalid checkout selection";
 
   useEffect(() => {
     if (window.fbq) {
@@ -149,6 +145,11 @@ function CheckoutContent() {
   };
 
   const handlePayment = async () => {
+    if (!selection) {
+      alert("This checkout link is invalid. Please select a package again.");
+      return;
+    }
+
     if (window.fbq) {
       window.fbq('trackCustom', 'ClickPaySecurely', {
         content_name: form.reportType,
@@ -206,13 +207,18 @@ function CheckoutContent() {
     try {
       const res = await fetch("/api/create-order", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          amount: finalAmount, 
-          form: form 
+          service: selection.service,
+          plan: selection.plan,
+          form,
         }),
       });
-  
+
       const order = await res.json();
+      if (!res.ok) {
+        throw new Error(order.error || "Could not create payment order");
+      }
 
       const options = {
         key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
@@ -230,10 +236,16 @@ function CheckoutContent() {
             });
           }
 
-          await fetch("/api/payment-success", {
+          const successResponse = await fetch("/api/payment-success", {
             method: "POST",
-            body: JSON.stringify({ ...response, form, finalAmount }),
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...response, form }),
           });
+
+          if (!successResponse.ok) {
+            throw new Error("Payment was received, but order confirmation failed");
+          }
+
           window.location.href = "/success";
         },
         prefill: { name: form.name, email: form.email, contact: form.phone },
@@ -248,6 +260,16 @@ function CheckoutContent() {
       setLoading(false);
     }
   };
+
+  if (!selection) {
+    return (
+      <div className="max-w-xl mx-auto bg-white border border-[#E8D8B8] rounded-xl p-8 text-center">
+        <h2 className="text-2xl font-bold text-[#8B1E1E] mb-3">Invalid checkout link</h2>
+        <p className="text-[#6B4423] mb-6">Please return and select a valid service package.</p>
+        <Link href="/" className="font-bold text-[#8B1E1E] underline">Return to packages</Link>
+      </div>
+    );
+  }
 
   const inputClass = "w-full bg-[#FCF7EE] border border-[#E8D8B8] rounded-xl p-3.5 text-sm text-[#2A1400] focus:outline-none focus:ring-2 focus:ring-[#C8A84B]/50 transition-all placeholder-gray-400";
   const matchmakingInputClass = "w-full bg-transparent border-b border-[#E8D8B8] p-2 text-sm text-[#2A1400] focus:outline-none focus:border-[#8B1E1E] transition-all placeholder-gray-400/50 mb-2";

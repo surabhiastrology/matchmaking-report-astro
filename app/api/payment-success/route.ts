@@ -3,6 +3,8 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 import { Resend } from "resend";
 import Redis from "ioredis";
+import { resolveCheckoutSelection } from "@/lib/checkoutCatalog";
+import { createRazorpayClient } from "@/lib/razorpay";
 
 // ==========================================
 // 1. INITIALIZE SERVICES
@@ -114,7 +116,17 @@ async function sendWhatsAppMessage(to: string, text: string, buttons?: string[],
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { razorpay_payment_id, razorpay_order_id, razorpay_signature, form, finalAmount } = body;
+    const { razorpay_payment_id, razorpay_order_id, razorpay_signature, form: submittedForm } = body;
+
+    if (
+      typeof razorpay_payment_id !== "string" ||
+      typeof razorpay_order_id !== "string" ||
+      typeof razorpay_signature !== "string" ||
+      !submittedForm ||
+      typeof submittedForm !== "object"
+    ) {
+      return NextResponse.json({ error: "Invalid payment confirmation" }, { status: 400 });
+    }
     
     // A. VERIFY SIGNATURE
     const secret = process.env.RAZORPAY_KEY_SECRET!;
@@ -126,6 +138,27 @@ export async function POST(req: Request) {
     if (generatedSignature !== razorpay_signature) {
       return NextResponse.json({ error: "Invalid signature." }, { status: 400 });
     }
+
+    const razorpayOrder = await createRazorpayClient().orders.fetch(razorpay_order_id);
+    const selection = resolveCheckoutSelection(
+      razorpayOrder.notes?.service,
+      razorpayOrder.notes?.plan,
+    );
+    const amountPaise = Number(razorpayOrder.amount);
+
+    if (
+      !selection ||
+      razorpayOrder.currency !== "INR" ||
+      amountPaise !== selection.amount * 100
+    ) {
+      return NextResponse.json({ error: "Order amount validation failed" }, { status: 400 });
+    }
+
+    const form = {
+      ...submittedForm,
+      reportType: selection.reportType,
+    };
+    const finalAmount = selection.amount;
 
     // B. SAVE TO MONGODB
     await connectDB();

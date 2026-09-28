@@ -4,6 +4,8 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 import { Resend } from "resend";
 import Redis from "ioredis";
+import { resolveCheckoutSelection } from "@/lib/checkoutCatalog";
+import { createRazorpayClient } from "@/lib/razorpay";
 
 // ==========================================
 // 1. INITIALIZE SERVICES (With Caching)
@@ -160,7 +162,18 @@ export async function POST(req: Request) {
     const event = JSON.parse(rawBody);
 
     if (event.event === "payment.captured") {
-      const { id: paymentId, order_id: razorpayOrderId, notes, amount: amountPaise } = event.payload.payment.entity;
+      const { id: paymentId, order_id: razorpayOrderId, amount: amountPaise } = event.payload.payment.entity;
+      const razorpayOrder = await createRazorpayClient().orders.fetch(razorpayOrderId);
+      const trustedNotes = razorpayOrder.notes;
+      const selection = resolveCheckoutSelection(trustedNotes?.service, trustedNotes?.plan);
+
+      if (
+        !selection ||
+        Number(amountPaise) !== selection.amount * 100 ||
+        Number(razorpayOrder.amount) !== selection.amount * 100
+      ) {
+        return NextResponse.json({ error: "Order amount validation failed" }, { status: 400 });
+      }
 
       await connectDB();
       
@@ -171,15 +184,17 @@ export async function POST(req: Request) {
       }
 
       // 1. EXTRACT DATA FROM NOTES
-      const formData = notes?.formData ? JSON.parse(notes.formData) : {};
+      const formData = trustedNotes?.formData
+        ? { ...JSON.parse(String(trustedNotes.formData)), reportType: selection.reportType }
+        : { reportType: selection.reportType };
 
       if (!order) {
         // Fallback: Create Order if success API hasn't run yet
         await Order.create({
           paymentId,
           orderId: razorpayOrderId,
-          amount: amountPaise / 100,
-          reportType: formData.reportType || "Vedic Report",
+          amount: selection.amount,
+          reportType: selection.reportType,
           customer: formData,
           partner: {
             name: formData?.partnerName,
